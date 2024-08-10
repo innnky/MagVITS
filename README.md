@@ -3,7 +3,8 @@ VITS with phoneme-level prosody modeling based on MaskGIT （WIP）
 
 feature: inference speed ~= bert-vits2 & prosody > bert-vits2 (maybe)
 
-目前代码正在重构，可能还跑不通
+目前代码正在重构，可能还跑不通，目前不建议跑
+中文预训练模型不久后会上传（数据：原神中文+aishell+wenetspeech4tts premium 共约1200h）
 
 ### structure
 ![](img/magvits.png)

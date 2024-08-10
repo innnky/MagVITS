@@ -1,0 +1,26 @@
+log_dir: "logs/asr"
+save_freq: 1
+device: "cuda"
+epochs: 200
+batch_size: 16
+pretrained_model: '/home/rcell/data/ar-vits/logs-0630/asr/epoch=43-step=132792.ckpt'
+train_data: "Data/train.txt"
+val_data: "Data/val.txt"
+load_only_params: False
+preprocess_parasm:
+  sr: 32000
+  spect_params:
+    n_fft: 2048
+    win_length: 2048
+    hop_length: 640
+  mel_params:
+    n_mels: 128
+
+model_params:
+   input_dim: 128
+   hidden_dim: 256
+   n_token: 400
+   token_embedding_dim: 256
+
+optimizer_params:
+  lr: 0.0005

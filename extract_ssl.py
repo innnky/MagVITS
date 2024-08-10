@@ -10,7 +10,7 @@ from tqdm import tqdm
 
 import utils
 from data_conf import data_root
-from cnhubert import get_model, get_content
+from module.cnhubert import get_model, get_content
 import logging
 
 logging.getLogger("numba").setLevel(logging.WARNING)

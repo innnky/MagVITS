@@ -6,7 +6,7 @@ import os
 filenames = glob(f"{data_root}/**/*.wav", recursive=True)  # [:10]
 filenames = [f for f in tqdm(filenames) if '/zh/' in f and os.path.exists(f.replace('.wav', '.lab'))]
 shuffle(filenames)
-    
+
 val_num = 12
 print(len(filenames))
 train = filenames[:-val_num]

@@ -20,8 +20,8 @@
     "c_kl": 1.0
   },
   "data": {
-    "training_files": "dump/s2_train_files.list",
-    "validation_files": "dump/s2_val_files.list",
+    "training_files": "dump/train_files.list",
+    "validation_files": "dump/val_files.list",
     "max_wav_value": 32768.0,
     "sampling_rate": 32000,
     "filter_length": 2048,
@@ -87,6 +87,6 @@
     "freeze_quantizer": false,
     "use_reference_enc": true
   },
-  "s2_ckpt_dir": "logs/s2",
+  "s2_ckpt_dir": "logs/vits",
   "content_module": "whisper"
 }

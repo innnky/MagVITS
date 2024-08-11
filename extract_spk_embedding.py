@@ -4,28 +4,23 @@ from pyannote.audio import Inference
 
 import math
 import multiprocessing
-import os
 from random import shuffle
 import torch.multiprocessing as mp
 
 import torch
 from glob import glob
 
-import torchaudio
 from tqdm import tqdm
 
-import utils
 import logging
 
 from data_conf import data_root
-from module.mel_processing import spectrogram_torch, spec_to_mel_torch
-from module.models import SynthesizerTrn
 
 logging.getLogger("numba").setLevel(logging.WARNING)
 
 
 def process_one(file_path, inference, device):
-    spk_emb_path = file_path.replace(".wav", ".spk.npy")
+    spk_emb_path = file_path.replace(".wav", ".spk.npy").replace(".mp3", ".spk.npy")
     try:
         np.load(spk_emb_path)
     except:
@@ -57,6 +52,7 @@ in_dir = data_root
 
 if __name__ == "__main__":
     filenames = glob(f"{in_dir}/**/*.wav", recursive=True)  # [:10]
+    filenames += glob(f"{in_dir}/**/*.mp3", recursive=True)  # [:10]
     shuffle(filenames)
     multiprocessing.set_start_method("spawn", force=True)
 

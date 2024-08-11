@@ -95,8 +95,8 @@ config_path = 'configs/asr.yml'
 ckpt_path = 'logs/asr/last.ckpt'
 dump_dir = 'dump'
 phoneme_path = f'{dump_dir}/phoneme.npy'
-train_path = f'{dump_dir}/s2_train_files.list'
-val_path = f'{dump_dir}/s2_val_files.list'
+train_path = f'{dump_dir}/train_files.list'
+val_path = f'{dump_dir}/val_files.list'
 config = yaml.safe_load(open(config_path))
 model = build_model(model_params=config['model_params'] or {})
 state_dict = torch.load(ckpt_path, map_location="cpu")['state_dict']
@@ -160,7 +160,7 @@ with torch.no_grad():
         # print(duration, len(duration), sum(duration))
         duration = s2s_attn_mono[0].long().sum(-1).detach().cpu()
 
-        save_path = wave_path.replace('.wav', '.dur.pt')
+        save_path = wave_path.replace('.wav', '.dur.pt').replace('.mp3', '.dur.pt')
         torch.save(duration, save_path)
         processed_cnt += 1
         # text_input, text_input_length, mel_input, mel_input_length

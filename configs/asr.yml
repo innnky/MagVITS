@@ -3,7 +3,7 @@ save_freq: 1
 device: "cuda"
 epochs: 200
 batch_size: 16
-pretrained_model: '/home/rcell/data/ar-vits/logs-0630/asr/epoch=43-step=132792.ckpt'
+pretrained_model: 'pretrain/asr.ckpt'
 train_data: "Data/train.txt"
 val_data: "Data/val.txt"
 load_only_params: False

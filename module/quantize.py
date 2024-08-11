@@ -8,7 +8,9 @@ import torch.nn.functional as F
 from einops import rearrange
 from torch.nn.utils import weight_norm
 
-from dac.nn.layers import WNConv1d
+
+def WNConv1d(*args, **kwargs):
+    return weight_norm(nn.Conv1d(*args, **kwargs))
 
 
 class VectorQuantize(nn.Module):

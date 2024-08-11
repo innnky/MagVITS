@@ -17,7 +17,7 @@ def get_wav_files(path):
     wav_files = []
     for root, dirs, files in os.walk(path):
         for file in files:
-            if file.endswith(".wav"):
+            if file.endswith(".wav") or file.endswith(".mp3"):
                 wav_files.append(os.path.join(root, file))
     return wav_files
 

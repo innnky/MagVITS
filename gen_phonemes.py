@@ -19,12 +19,11 @@ phone_dict = {}
 
 def process_file(data):
     wav_path, language = data
-    lab_path = wav_path.replace(".wav", ".lab")
+    lab_path = wav_path.replace(".wav", ".lab").replace(".mp3", ".lab")
     if os.path.exists(lab_path):
-        text = open(lab_path).readline().strip()
-        if '{' in text or '^' in text:
-            print(f"Error, {text}, {wav_path}")
-            return None
+        print(lab_path)
+        text = open(lab_path, encoding='utf-8').readline().strip()
+
         try:
             phones, word2ph, norm_text = clean_text(text, language)
 
@@ -33,7 +32,7 @@ def process_file(data):
             gpu_id = rank % torch.cuda.device_count()
             device = torch.device(f"cuda:{gpu_id}")
             bert_feature = get_bert_feature(norm_text, word2ph, device, language)
-            torch.save(bert_feature.cpu(), wav_path.replace(".wav", ".bert.pt"))
+            torch.save(bert_feature.cpu(), wav_path.replace(".wav", ".bert.pt").replace(".mp3", ".bert.pt"))
 
             phones = " ".join(phones)
             return (wav_path, phones)
@@ -42,15 +41,18 @@ def process_file(data):
             return None
     else:
         return None
+
+
 if __name__ == '__main__':
 
     for language in ['zh']:
         filenames = glob(f"{data_root}/{language}/**/*.wav", recursive=True)
+        filenames += glob(f"{data_root}/{language}/**/*.mp3", recursive=True)
 
         # Define the number of processes to use
-        num_processes = 8  # You can adjust this as needed
+        num_processes = 1  # You can adjust this as needed
         # multiprocessing.set_start_method("spawn", force=True)
-
+        print(len(filenames))
         with Pool(num_processes) as pool:
             results = list(tqdm(pool.imap(process_file, [(f, language) for f in filenames]), total=len(filenames)))
 

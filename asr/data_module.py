@@ -1,10 +1,6 @@
-import datasets
 import pytorch_lightning as pl
 
 from asr.meldataset import build_dataloader
-from mq.data.QuantizeDataset import QuantizeDataset
-from mq.data.sampler import RandomBucketSampler
-from torch.utils import data
 
 
 
@@ -24,8 +20,8 @@ def get_data_path_list(train_path=None, val_path=None):
 class ASRDataModule(pl.LightningDataModule):
     def __init__(self, data_dir='dump/', batch_size=64,num_workers=8):
         super().__init__()
-        train_path = f'{data_dir}/s2_train_files.list'
-        val_path = f'{data_dir}/s2_val_files.list'
+        train_path = f'{data_dir}/train_files.list'
+        val_path = f'{data_dir}/val_files.list'
         train_list, val_list = get_data_path_list(train_path, val_path)
         train_dataloader = build_dataloader(train_list,
                                             batch_size=batch_size,

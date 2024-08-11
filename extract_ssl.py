@@ -21,7 +21,7 @@ def process_one(file_path, model):
 
     # file_path16k = file_path.replace('genshin_data', 'genshin_data16k')
 
-    ssl_path = file_path.replace(".wav", ".ssl.pt")
+    ssl_path = file_path.replace(".wav", ".ssl.pt").replace(".mp3", ".ssl.pt")
     ssl_content = get_content(model, file_path)
     assert not torch.isnan(ssl_content).any(), f"NaN in {file_path}"
     torch.save(ssl_content.half().cpu(), ssl_path)
@@ -47,10 +47,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
-        "--config", type=str, default="configs/s2.json", help="path to config"
+        "--config", type=str, default="configs/vits.json", help="path to config"
     )
     args = parser.parse_args()
     filenames = glob(f"{data_root}/**/*.wav", recursive=True)  # [:10]
+    filenames += glob(f"{data_root}/**/*.mp3", recursive=True)  # [:10]
     hps = utils.get_hparams_from_file(args.config)
     shuffle(filenames)
     multiprocessing.set_start_method("spawn", force=True)

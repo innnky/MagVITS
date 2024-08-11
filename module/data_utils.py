@@ -13,26 +13,25 @@ from text.symbols import v
 from utils import load_wav_to_torch, load_filepaths_and_text
 import torch.nn.functional as F
 
-
 f0_bin = 64
 f0_max = 1100.0
 f0_min = 50.0
 f0_mel_min = 1127 * np.log(1 + f0_min / 700)
 f0_mel_max = 1127 * np.log(1 + f0_max / 700)
 
-def f0_to_coarse(f0):
-  f0_mel = 1127 * (1 + f0 / 700).log()
-  a = (f0_bin - 2) / (f0_mel_max - f0_mel_min)
-  b = f0_mel_min * a - 1.
-  f0_mel = torch.where(f0_mel > 0, f0_mel * a - b, f0_mel)
-  # torch.clip_(f0_mel, min=1., max=float(f0_bin - 1))
-  f0_coarse = torch.round(f0_mel).long()
-  f0_coarse = f0_coarse * (f0_coarse > 0)
-  f0_coarse = f0_coarse + ((f0_coarse < 1) * 1)
-  f0_coarse = f0_coarse * (f0_coarse < f0_bin)
-  f0_coarse = f0_coarse + ((f0_coarse >= f0_bin) * (f0_bin - 1))
-  return f0_coarse
 
+def f0_to_coarse(f0):
+    f0_mel = 1127 * (1 + f0 / 700).log()
+    a = (f0_bin - 2) / (f0_mel_max - f0_mel_min)
+    b = f0_mel_min * a - 1.
+    f0_mel = torch.where(f0_mel > 0, f0_mel * a - b, f0_mel)
+    # torch.clip_(f0_mel, min=1., max=float(f0_bin - 1))
+    f0_coarse = torch.round(f0_mel).long()
+    f0_coarse = f0_coarse * (f0_coarse > 0)
+    f0_coarse = f0_coarse + ((f0_coarse < 1) * 1)
+    f0_coarse = f0_coarse * (f0_coarse < f0_bin)
+    f0_coarse = f0_coarse + ((f0_coarse >= f0_bin) * (f0_bin - 1))
+    return f0_coarse
 
 
 """Multi speaker version"""
@@ -45,7 +44,8 @@ class TextAudioSpeakerLoader(torch.utils.data.Dataset):
         3) computes spectrograms from audio files.
     """
 
-    def __init__(self, audiopaths_sid_text, hparams, get_path=False, meta=None, val=False, phoneme_path='dump/phoneme.npy'):
+    def __init__(self, audiopaths_sid_text, hparams, get_path=False, meta=None, val=False,
+                 phoneme_path='dump/phoneme.npy'):
         self.audiopaths_sid_text = load_filepaths_and_text(audiopaths_sid_text)
         self.max_wav_value = hparams.max_wav_value
         self.sampling_rate = hparams.sampling_rate
@@ -94,17 +94,18 @@ class TextAudioSpeakerLoader(torch.utils.data.Dataset):
                 skipped += 1
                 continue
 
-            bert_path = audiopath.replace('.wav', '.bert.pt')
+            bert_path = audiopath.replace('.wav', '.bert.pt').replace('.mp3', '.bert.pt')
             if not os.path.exists(bert_path):
                 skipped += 1
                 continue
-            duration_path = audiopath.replace('.wav', '.dur.pt')
+            duration_path = audiopath.replace('.wav', '.dur.pt').replace('.mp3', '.dur.pt')
             if not os.path.exists(duration_path):
                 skipped += 1
                 continue
-            sslpath = audiopath.replace('.wav', '.ssl.pt')
-            if os.path.exists(audiopath) and os.path.exists(sslpath) and (os.path.getsize(audiopath) / self.sampling_rate /2 > 0.6 or self.val):
-                audiopaths_sid_text_new.append([audiopath,sslpath, bert_path, phoneme_ids,duration_path])
+            sslpath = audiopath.replace('.wav', '.ssl.pt').replace('.mp3', '.ssl.pt')
+            if os.path.exists(audiopath) and os.path.exists(sslpath) and (
+                    os.path.getsize(audiopath) / self.sampling_rate / 2 > 0.6 or self.val):
+                audiopaths_sid_text_new.append([audiopath, sslpath, bert_path, phoneme_ids, duration_path])
                 lengths.append(os.path.getsize(audiopath) // (2 * self.hop_length))
             else:
                 skipped += 1
@@ -122,20 +123,20 @@ class TextAudioSpeakerLoader(torch.utils.data.Dataset):
             spec, wav = self.get_audio(audiopath)
         except:
             spec = torch.zeros(1025, 100)
-            wav = torch.zeros(1, 100*self.hop_length)
+            wav = torch.zeros(1, 100 * self.hop_length)
             print("load audio error!!!!!!", audiopath)
 
         duration = torch.load(duration_path)
         assert duration.shape[0] == len(phoneme_ids), (duration.shape, phoneme_ids.shape)
         total_len = duration.sum().item()
-        
+
         assert abs(total_len - spec.shape[-1]) < 3, (total_len, spec.shape[-1], audiopath)
         if spec.shape[-1] < total_len:
             spec = F.pad(spec, (0, total_len - spec.shape[-1]))
-            wav = F.pad(wav, (0, total_len*self.hop_length-wav.shape[-1]))
+            wav = F.pad(wav, (0, total_len * self.hop_length - wav.shape[-1]))
         elif spec.shape[-1] > total_len:
             spec = spec[:, :total_len]
-            wav = wav[:, :total_len*self.hop_length]
+            wav = wav[:, :total_len * self.hop_length]
 
         ssl = torch.load(sslpath)
         ssl = F.interpolate(ssl, size=spec.shape[-1], mode="nearest")
@@ -143,11 +144,10 @@ class TextAudioSpeakerLoader(torch.utils.data.Dataset):
         bert_feature = torch.load(bert_path)
         bert_feature = F.interpolate(bert_feature.unsqueeze(0), scale_factor=2, mode='nearest')
         bert_feature = F.pad(bert_feature, (0, 1), value=0).squeeze(0)
-        
 
         assert bert_feature.shape[-1] == len(phoneme_ids)
 
-        spk_emb = np.load(audiopath.replace('.wav', '.spk.npy'))
+        spk_emb = np.load(audiopath.replace('.wav', '.spk.npy').replace('.mp3', '.spk.npy'))
         spk_emb = torch.FloatTensor(spk_emb)
 
         return (ssl, spec, wav, text, bert_feature, spk_emb, duration)
@@ -159,15 +159,10 @@ class TextAudioSpeakerLoader(torch.utils.data.Dataset):
                 sampling_rate, self.sampling_rate))
         audio_norm = audio
         audio_norm = audio_norm.unsqueeze(0)
-        spec_filename = filename.replace(".wav", ".spec.pt")
-        if os.path.exists(spec_filename):
-            spec = torch.load(spec_filename)
-        else:
-            spec = spectrogram_torch(audio_norm, self.filter_length,
-                                     self.sampling_rate, self.hop_length, self.win_length,
-                                     center=False)
-            spec = torch.squeeze(spec, 0)
-            # torch.save(spec, spec_filename)
+        spec = spectrogram_torch(audio_norm, self.filter_length,
+                                 self.sampling_rate, self.hop_length, self.win_length,
+                                 center=False)
+        spec = torch.squeeze(spec, 0)
         return spec, audio_norm
 
     def get_sid(self, sid):
@@ -179,6 +174,7 @@ class TextAudioSpeakerLoader(torch.utils.data.Dataset):
 
     def __len__(self):
         return len(self.audiopaths_sid_text)
+
 
 class TextAudioSpeakerCollate():
     """ Zero-pads model inputs and targets
@@ -208,8 +204,8 @@ class TextAudioSpeakerCollate():
 
         spec_padded = torch.FloatTensor(len(batch), batch[0][1].size(0), max_spec_len)
         wav_padded = torch.FloatTensor(len(batch), 1, max_wav_len)
-        ssl_padded = torch.FloatTensor(len(batch),768, max_spec_len)
-        text_padded = torch.LongTensor(len(batch),  max_text_len)
+        ssl_padded = torch.FloatTensor(len(batch), 768, max_spec_len)
+        text_padded = torch.LongTensor(len(batch), max_text_len)
         bert_padded = torch.FloatTensor(len(batch), 1024, max_text_len)
         spk_emb_padded = torch.FloatTensor(len(batch), 256)
         duration_padded = torch.LongTensor(len(batch), max_text_len)
@@ -239,7 +235,7 @@ class TextAudioSpeakerCollate():
             text_lengths[i] = text.size(0)
 
             bert = row[4]
-            bert_padded[i,:, :bert.size(-1)] = bert
+            bert_padded[i, :, :bert.size(-1)] = bert
 
             spk_emb = row[5]
             spk_emb_padded[i] = spk_emb

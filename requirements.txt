@@ -1,0 +1,10 @@
+cn2an
+jieba
+pypinyin
+g2p_en
+transformers
+torch
+torchaudio
+git+https://github.com/resemble-ai/monotonic_align.git
+jiwer
+tensorboard

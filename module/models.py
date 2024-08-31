@@ -39,52 +39,140 @@ class TextEncoder(nn.Module):
         self.kernel_size = kernel_size
         self.p_dropout = p_dropout
 
-        self.text_emb = nn.Embedding(len(symbols), hidden_channels)
-        nn.init.normal_(self.text_emb.weight, 0.0, hidden_channels ** -0.5)
-        self.encoder = attentions.Encoder(
+        self.text_emb = nn.Embedding(len(symbols), 512)
+        self.bert_proj = nn.Linear(1024, 512)
+
+        norm_first = False
+        self.position = SinePositionalEmbedding(
+            512, dropout=0.1, scale=False, alpha=True)
+        self.encoder = TransformerEncoder(
+            TransformerEncoderLayer(
+                d_model=512,
+                nhead=16,
+                dim_feedforward=2048,
+                dropout=0.1,
+                batch_first=True,
+                norm_first=False, ),
+            num_layers=6,
+            norm=LayerNorm(512) if norm_first else None, )
+
+        self.proj = nn.Conv1d(512, out_channels, 1)
+
+    def forward_encoder(self, x, mask=None):
+        if mask is not None:
+            mask = ~mask.squeeze(1).bool()
+        x = self.position(x)
+        x, _ = self.encoder(
+            (x, None), src_key_padding_mask=mask)
+        return x
+
+    def forward(self, x, x_lengths, bert):
+        x_mask = torch.unsqueeze(commons.sequence_mask(x_lengths, x.size(-1)), 1).to(x.dtype)
+        bert = self.bert_proj(bert.transpose(1, 2))
+        x = self.text_emb(x) + bert
+        x = self.forward_encoder(x, x_mask)
+        x = self.proj(x.transpose(1, 2)) * x_mask
+        return x, x_mask
+
+
+class TransformerCouplingLayer(nn.Module):
+    def __init__(
+            self,
+            channels,
+            hidden_channels,
+            kernel_size,
+            n_layers,
+            n_heads,
+            p_dropout=0,
+            filter_channels=0,
+            mean_only=False,
+            gin_channels=0,
+    ):
+        assert channels % 2 == 0, "channels should be divisible by 2"
+        super().__init__()
+        self.channels = channels
+        self.hidden_channels = hidden_channels
+        self.kernel_size = kernel_size
+        self.n_layers = n_layers
+        self.half_channels = channels // 2
+        self.mean_only = mean_only
+
+        self.pre = nn.Conv1d(self.half_channels, hidden_channels, 1)
+        self.enc = attentions.Encoder(
             hidden_channels,
             filter_channels,
             n_heads,
             n_layers,
             kernel_size,
-            p_dropout)
-        self.proj = nn.Conv1d(hidden_channels, out_channels, 1)
-        self.bert_proj = nn.Linear(1024, hidden_channels)
+            p_dropout,
+            isflow=True,
+            gin_channels=gin_channels,
+        )
+        self.post = nn.Conv1d(hidden_channels, self.half_channels * (2 - mean_only), 1)
+        self.post.weight.data.zero_()
+        self.post.bias.data.zero_()
 
-    def forward(self, x, x_lengths, bert):
-        bert = self.bert_proj(bert.transpose(1,2))
-        x_mask = torch.unsqueeze(commons.sequence_mask(x_lengths, x.size(-1)), 1).to(x.dtype)
-        x = (self.text_emb(x)+bert) * math.sqrt(self.hidden_channels)  # [b, t, h]
-        x = torch.transpose(x, 1, -1)  # [b, h, t]
+    def forward(self, x, x_mask, g=None, reverse=False):
+        x0, x1 = torch.split(x, [self.half_channels] * 2, 1)
+        h = self.pre(x0) * x_mask
+        h = self.enc(h, x_mask, g=g)
+        stats = self.post(h) * x_mask
+        if not self.mean_only:
+            m, logs = torch.split(stats, [self.half_channels] * 2, 1)
+        else:
+            m = stats
+            logs = torch.zeros_like(m)
 
-        x = self.encoder(x * x_mask, x_mask)
-        x = self.proj(x) * x_mask
-        return x, x_mask
+        if not reverse:
+            x1 = m + x1 * torch.exp(logs) * x_mask
+            x = torch.cat([x0, x1], 1)
+            logdet = torch.sum(logs, [1, 2])
+            return x, logdet
+        else:
+            x1 = (x1 - m) * torch.exp(-logs) * x_mask
+            x = torch.cat([x0, x1], 1)
+            return x
 
 
-class ResidualCouplingBlock(nn.Module):
-    def __init__(self,
-                 channels,
-                 hidden_channels,
-                 kernel_size,
-                 dilation_rate,
-                 n_layers,
-                 n_flows=4,
-                 gin_channels=0):
+class TransformerCouplingBlock(nn.Module):
+    def __init__(
+            self,
+            channels,
+            hidden_channels,
+            filter_channels,
+            n_heads,
+            n_layers,
+            kernel_size,
+            p_dropout,
+            n_flows=4,
+            gin_channels=0,
+    ):
         super().__init__()
         self.channels = channels
         self.hidden_channels = hidden_channels
         self.kernel_size = kernel_size
-        self.dilation_rate = dilation_rate
         self.n_layers = n_layers
         self.n_flows = n_flows
         self.gin_channels = gin_channels
 
         self.flows = nn.ModuleList()
+
+        self.wn = None
+
         for i in range(n_flows):
             self.flows.append(
-                modules.ResidualCouplingLayer(channels, hidden_channels, kernel_size, dilation_rate, n_layers,
-                                              gin_channels=gin_channels, mean_only=True))
+                TransformerCouplingLayer(
+                    channels,
+                    hidden_channels,
+                    kernel_size,
+                    n_layers,
+                    n_heads,
+                    p_dropout,
+                    filter_channels,
+                    mean_only=True,
+                    gin_channels=self.gin_channels,
+                )
+            )
             self.flows.append(modules.Flip())
 
     def forward(self, x, x_mask, g=None, reverse=False):
@@ -274,6 +362,7 @@ class MultiPeriodDiscriminator(torch.nn.Module):
 
         return y_d_rs, y_d_gs, fmap_rs, fmap_gs
 
+
 class ReferenceEncoder(nn.Module):
     '''
     inputs --- [N, Ty/r, n_mels*r]  mels
@@ -324,6 +413,7 @@ class ReferenceEncoder(nn.Module):
             L = (L - kernel_size + 2 * pad) // stride + 1
         return L
 
+
 class FramePriorNet(nn.Module):
     def __init__(self,
                  out_channels,
@@ -335,15 +425,14 @@ class FramePriorNet(nn.Module):
                  p_dropout):
         super().__init__()
 
-
         self.enc = attentions.Encoder(
             hidden_channels,
             filter_channels,
             n_heads,
-            4,
+            6,
             kernel_size,
             p_dropout)
-        self.out_proj = nn.Conv1d(hidden_channels, out_channels*2, 1)
+        self.out_proj = nn.Conv1d(hidden_channels, out_channels * 2, 1)
         self.out_channels = out_channels
 
     def forward(self, x, x_mask):
@@ -351,6 +440,7 @@ class FramePriorNet(nn.Module):
         stats = self.out_proj(x) * x_mask
         m, logs = torch.split(stats, self.out_channels, dim=1)
         return m, logs
+
 
 class ProsodyEncoder(nn.Module):
     def __init__(self,
@@ -388,23 +478,25 @@ class ProsodyEncoder(nn.Module):
 
     def calc_dur_loss(self, x, x_mask, dur):
         x = self.duration_dec(x, x_mask)
-        logits = self.duration_proj(x.transpose(1,2))
+        logits = self.duration_proj(x.transpose(1, 2))
         assert logits.shape[:2] == dur.shape[:2], (logits.shape, dur.shape)
         x_mask_bool = x_mask.squeeze(1).bool()
         dur = dur[x_mask_bool].view(-1)
         logits = logits[x_mask_bool].view(-1, 512)
         dur_loss = F.cross_entropy(logits, dur, reduction='mean')
-        acc = (logits.argmax(-1) == dur).float().mean()*100
+        acc = (logits.argmax(-1) == dur).float().mean() * 100
         print('dur acc', acc.item())
         pred_dur = logits.argmax(-1)
 
         return dur_loss, pred_dur
-    def decode_dur(self,x, x_mask):
+
+    def decode_dur(self, x, x_mask):
         x = self.duration_dec(x, x_mask)
-        logits = self.duration_proj(x.transpose(1,2))
+        logits = self.duration_proj(x.transpose(1, 2))
         logits = logits.view(-1, 512)
         pred_dur = logits.argmax(-1).reshape(-1, x.size(2))
         return pred_dur
+
     def forward(self, y, x_mask, attn, dur, v_mask):
         y = self.in_proj(y)
         s = attn.sum(axis=2).unsqueeze(2)
@@ -416,7 +508,7 @@ class ProsodyEncoder(nn.Module):
         g, dur = self.encode_dur(dur)
         x = self.enc(x, x_mask, g=g)
         z_q, commitment_loss, codebook_loss, indices, z_e = self.prosody_quantizer(x)
-        quantize_loss = codebook_loss + 0.25*commitment_loss
+        quantize_loss = codebook_loss + 0.25 * commitment_loss
         dur_loss, pred_dur = self.calc_dur_loss(z_q, x_mask, dur)
         return z_q, quantize_loss, indices, dur_loss, pred_dur
 
@@ -424,6 +516,8 @@ class ProsodyEncoder(nn.Module):
         z_q = self.prosody_quantizer.decode(indices)
         dur = self.decode_dur(z_q, x_mask)
         return z_q, dur
+
+
 import random
 from tqdm import tqdm
 
@@ -431,7 +525,7 @@ from tqdm import tqdm
 class NARPredictor(nn.Module):
     def __init__(self, codebook_size=128, gin_channels=0):
         super().__init__()
-        
+
         norm_first = False
         self.encoder = TransformerEncoder(
             TransformerEncoderLayer(
@@ -449,26 +543,27 @@ class NARPredictor(nn.Module):
         self.bert_proj = nn.Linear(1024, 512)
         self.x_proj = nn.Linear(192, 512)
         self.g_emb = nn.Linear(256, 512)
-        
+
         self.proj = nn.Linear(512, codebook_size, bias=False)
 
-        self.quantize_embedding = nn.Embedding(codebook_size+1, 512)
+        self.quantize_embedding = nn.Embedding(codebook_size + 1, 512)
         self.n_codes = codebook_size
 
-    def forward_encoder(self, x):
+    def forward_encoder(self, x, mask=None):
+        if mask is not None:
+            mask = ~mask.squeeze(1).bool()
         x = self.position(x)
         x, _ = self.encoder(
-            (x, None), mask=None)
+            (x, None), src_key_padding_mask=mask)
         audio_output = self.proj(x)
         return audio_output
 
-    def forward(self,x, x_mask,bert,spk_emb, tgt_code):
+    def forward(self, x, x_mask, bert, spk_emb, tgt_code):
         g = self.g_emb(spk_emb).unsqueeze(1)
-        bert = self.bert_proj(bert.transpose(1,2))
-        x = self.x_proj((x*x_mask).transpose(1,2))
+        bert = self.bert_proj(bert.transpose(1, 2))
+        x = self.x_proj((x * x_mask).transpose(1, 2))
 
         x = x + bert + g
-
 
         # make mask
         quantization = tgt_code.clone()
@@ -479,9 +574,7 @@ class NARPredictor(nn.Module):
         quantization_emb = self.quantize_embedding(quantization)
 
         inp = x + quantization_emb
-        audio_output = self.forward_encoder(inp)
-
-
+        audio_output = self.forward_encoder(inp, mask=x_mask)
 
         x_mask_bool = x_mask.squeeze(1).bool()
         tgt_mask = x_mask_bool & mask
@@ -489,27 +582,25 @@ class NARPredictor(nn.Module):
         audio_output = audio_output[tgt_mask]
         tgt_code = tgt_code[tgt_mask].view(-1)
         predict_loss = F.cross_entropy(audio_output, tgt_code, reduction='mean')
-        acc = (audio_output.argmax(-1) == tgt_code).float().mean()*100
+        acc = (audio_output.argmax(-1) == tgt_code).float().mean() * 100
         print('prosody acc', acc.item())
         return predict_loss
 
     @torch.inference_mode()
     @torch.no_grad()
-    def infer(self,x, x_mask, bert, spk_emb,step=6, sched_mode="cosine", temp=10, randomize="linear", r_temp=10):
-        
+    def infer(self, x, x_mask, bert, spk_emb, step=5, sched_mode="square", temp=30, randomize="None", r_temp=30):
+
         g = self.g_emb(spk_emb).unsqueeze(1)
-        bert = self.bert_proj(bert.transpose(1,2))
-        x = self.x_proj((x*x_mask).transpose(1,2))
+        bert = self.bert_proj(bert.transpose(1, 2))
+        x = self.x_proj((x * x_mask).transpose(1, 2))
         x = x + bert + g
-        
+
         nb_sample = x.size(0)
         tgt_length = x.size(1)
 
         code = torch.full((nb_sample, tgt_length), self.n_codes).long().to(x.device)
-    
+
         mask = torch.ones((nb_sample, tgt_length)).to(x.device)
-
-
 
         scheduler = self.adap_sche(step, mode=sched_mode, tgt_length=tgt_length)
         for indice, t in enumerate(scheduler):
@@ -520,49 +611,41 @@ class NARPredictor(nn.Module):
             if mask.sum() == 0:  # Break if code is fully predicted
                 break
 
-
             quantization_emb = self.quantize_embedding(code.clone())
             inp = x + quantization_emb
             logit = self.forward_encoder(inp)
 
-            
             prob = torch.softmax(logit * temp, -1)
             distri = torch.distributions.Categorical(probs=prob)
             pred_code = distri.sample()
 
             conf = torch.gather(prob, 2, pred_code.view(nb_sample, tgt_length, 1))
 
-
             if randomize == "linear":  # add gumbel noise decreasing over the sampling process
-                ratio = (indice / (len(scheduler)-1))
+                ratio = (indice / (len(scheduler) - 1))
                 rand = r_temp * np.random.gumbel(size=(nb_sample, tgt_length)) * (1 - ratio)
                 conf = torch.log(conf.squeeze()) + torch.from_numpy(rand).to(x.device)
             elif randomize == "warm_up":  # chose random sample for the 2 first steps
                 conf = torch.rand_like(conf) if indice < 2 else conf
-            elif randomize == "random":   # chose random prediction at each step
+            elif randomize == "random":  # chose random prediction at each step
                 conf = torch.rand_like(conf)
-
 
             # do not predict on already predicted tokens
             conf[~mask.bool()] = -math.inf
 
-
             # chose the predicted token with the highest confidence
             tresh_conf, indice_mask = torch.topk(conf.view(nb_sample, -1), k=t, dim=-1)
             tresh_conf = tresh_conf[:, -1]
-
 
             # replace the chosen tokens
             conf = (conf >= tresh_conf.unsqueeze(-1)).view(nb_sample, tgt_length)
             f_mask = (mask.float() * conf.float()).bool()
             code[f_mask] = pred_code[f_mask]
 
-
             # update the mask
             for i_mask, ind_mask in enumerate(indice_mask):
                 mask[i_mask, ind_mask] = 0
         return code
-
 
     def adap_sche(self, step, mode="arccos", leave=False, tgt_length=None):
         """ Create a sampling scheduler
@@ -574,15 +657,15 @@ class NARPredictor(nn.Module):
             scheduler -> torch.LongTensor(): the list of token to predict at each step
         """
         r = torch.linspace(1, 0, step)
-        if mode == "root":              # root scheduler
+        if mode == "root":  # root scheduler
             val_to_mask = 1 - (r ** .5)
-        elif mode == "linear":          # linear scheduler
+        elif mode == "linear":  # linear scheduler
             val_to_mask = 1 - r
-        elif mode == "square":          # square scheduler
+        elif mode == "square":  # square scheduler
             val_to_mask = 1 - (r ** 2)
-        elif mode == "cosine":          # cosine scheduler
+        elif mode == "cosine":  # cosine scheduler
             val_to_mask = torch.cos(r * math.pi * 0.5)
-        elif mode == "arccos":          # arc cosine scheduler
+        elif mode == "arccos":  # arc cosine scheduler
             val_to_mask = torch.arccos(r) / (math.pi * 0.5)
         else:
             return
@@ -590,8 +673,8 @@ class NARPredictor(nn.Module):
         # fill the scheduler by the ratio of tokens to predict at each step
         sche = (val_to_mask / val_to_mask.sum()) * tgt_length
         sche = sche.round()
-        sche[sche == 0] = 1                                                  # add 1 to predict a least 1 token / step
-        sche[-1] += tgt_length - sche.sum()         # need to sum up nb of code
+        sche[sche == 0] = 1  # add 1 to predict a least 1 token / step
+        sche[-1] += tgt_length - sche.sum()  # need to sum up nb of code
         return tqdm(sche.int(), leave=leave)
 
 
@@ -621,7 +704,6 @@ class SynthesizerTrn(nn.Module):
                  use_sdp=True,
                  freeze_quantizer=False,
                  **kwargs):
-
         super().__init__()
         self.spec_channels = spec_channels
         self.inter_channels = inter_channels
@@ -652,49 +734,60 @@ class SynthesizerTrn(nn.Module):
                                  n_layers,
                                  kernel_size,
                                  p_dropout)
-
+        print('n_param of enc_p', sum(p.numel() for p in self.enc_p.parameters() if p.requires_grad) / 1e6, 'M')
         self.frame_prior_net = FramePriorNet(inter_channels,
-                                 hidden_channels,
-                                 filter_channels,
-                                 n_heads,
-                                 n_layers,
-                                 kernel_size,
-                                 p_dropout)
+                                             hidden_channels,
+                                             filter_channels,
+                                             n_heads,
+                                             n_layers,
+                                             kernel_size,
+                                             p_dropout)
 
         self.dec = Generator(inter_channels, resblock, resblock_kernel_sizes, resblock_dilation_sizes, upsample_rates,
                              upsample_initial_channel, upsample_kernel_sizes, gin_channels=gin_channels)
         self.enc_q = PosteriorEncoder(spec_channels, inter_channels, hidden_channels, 5, 1, 16,
                                       gin_channels=gin_channels)
-        self.flow = ResidualCouplingBlock(inter_channels, hidden_channels, 5, 1, 4, gin_channels=gin_channels)
+        self.flow = TransformerCouplingBlock(
+            inter_channels,
+            hidden_channels,
+            filter_channels,
+            n_heads,
+            4,
+            5,
+            p_dropout,
+            4,
+            gin_channels=gin_channels,
+        )
 
         self.ref_enc = modules.MelStyleEncoder(spec_channels, style_vector_dim=gin_channels)
         # self.ref_enc_prosody = modules.MelStyleEncoder(768, style_vector_dim=gin_channels)
         # self.ref_enc = ReferenceEncoder(spec_channels, gin_channels)
         codebook_size = 512
         self.prosody_encoder = ProsodyEncoder(768, hidden_channels, 5, 1, 6, gin_channels, codebook_size)
-        self.prosody_predictor = NARPredictor(codebook_size,gin_channels=gin_channels)
+        self.prosody_predictor = NARPredictor(codebook_size, gin_channels=gin_channels)
+        print('n_param of prosody_predictor',
+              sum(p.numel() for p in self.prosody_predictor.parameters() if p.requires_grad) / 1e6, 'M')
+
         # if freeze_quantizer:
         #     print('Freezing quantizer!!!')
         #     print('Freezing quantizer!!!')
         #     print('Freezing quantizer!!!')
         #     print('Freezing quantizer!!!')
+
         for param in self.prosody_encoder.parameters():
             param.requires_grad = False
-        self.spk_emb_proj = nn.Linear(256, gin_channels)
 
     def forward(self, x, x_lengths, y, y_lengths, ssl, duration, bert, spk_emb):
         y_mask = torch.unsqueeze(commons.sequence_mask(y_lengths, y.size(-1)), 1).to(y.dtype)
-        
-        g = self.ref_enc(y * y_mask, y_mask) + self.spk_emb_proj(spk_emb).unsqueeze(-1)
+
+        g = self.ref_enc(y * y_mask, y_mask)
 
         x_mask = torch.unsqueeze(commons.sequence_mask(x_lengths, x.size(-1)), 1).to(y.dtype)
         attn_mask = torch.unsqueeze(x_mask, 2) * torch.unsqueeze(y_mask, -1)
 
-
         attn = commons.generate_path(duration.unsqueeze(1), attn_mask)
         v_mask = (x > 0).float()
-        z_q, quantize_loss, indices, dur_loss, pred_dur = self.prosody_encoder(ssl, x_mask, attn, duration,v_mask)
-
+        z_q, quantize_loss, indices, dur_loss, pred_dur = self.prosody_encoder(ssl, x_mask, attn, duration, v_mask)
 
         x, x_mask = self.enc_p(x, x_lengths, bert)
         prosody_predict_loss = self.prosody_predictor(x, x_mask, bert, spk_emb, indices)
@@ -702,50 +795,36 @@ class SynthesizerTrn(nn.Module):
         frame_x = torch.matmul(attn.squeeze(1), x.transpose(1, 2)).transpose(1, 2)
         m_p, logs_p = self.frame_prior_net(frame_x, y_mask)
 
-
-
         z, m_q, logs_q, y_mask = self.enc_q(y, y_lengths, g=g)
         z_p = self.flow(z, y_mask, g=g)
 
-
-
         z_slice, ids_slice = commons.rand_slice_segments(z, y_lengths, self.segment_size)
         o = self.dec(z_slice, g=g)
-        return o, attn, ids_slice, x_mask, y_mask, (z, z_p, m_p, logs_p, m_q, logs_q), z_q, quantize_loss.mean(), dur_loss, pred_dur, prosody_predict_loss
+        return o, attn, ids_slice, x_mask, y_mask, (
+        z, z_p, m_p, logs_p, m_q, logs_q), z_q, quantize_loss.mean(), dur_loss, pred_dur, prosody_predict_loss
 
-
-    def reconstruct(self, x, x_lengths,y, y_lengths,  ssl, duration,bert,spk_emb, noise_scale=.4):
+    def reconstruct(self, x, x_lengths, y, y_lengths, ssl, duration, bert, spk_emb, noise_scale=.4):
         y_mask = torch.unsqueeze(commons.sequence_mask(y_lengths, y.size(-1)), 1).to(y.dtype)
-        g = self.ref_enc(y * y_mask, y_mask) + self.spk_emb_proj(spk_emb).unsqueeze(-1)
-
+        g = self.ref_enc(y * y_mask, y_mask)
 
         x_mask = torch.unsqueeze(commons.sequence_mask(x_lengths, x.size(-1)), 1).to(y.dtype)
-
-
 
         # attn_mask = torch.unsqueeze(x_mask, 2) * torch.unsqueeze(y_mask, -1)
         # attn = commons.generate_path(duration.unsqueeze(1), attn_mask)
         # v_mask = (x > 0).float()
         # z_q, quantize_loss, pred_prosody_codes, dur_loss, pred_dur = self.prosody_encoder(ssl, x_mask, attn, duration,v_mask)
 
-
-
-
-
         x, x_mask = self.enc_p(x, x_lengths, bert)
         pred_prosody_codes = self.prosody_predictor.infer(x, x_mask, bert, spk_emb)
-        z_q, duration= self.prosody_encoder.decode(pred_prosody_codes, x_mask)
-
+        z_q, duration = self.prosody_encoder.decode(pred_prosody_codes, x_mask)
 
         total_duration = torch.sum(duration, dim=1)
         y_lengths = total_duration.long()
-
 
         y_mask = torch.unsqueeze(commons.sequence_mask(y_lengths, y_lengths.max()), 1).float()
         attn_mask = torch.unsqueeze(x_mask, 2) * torch.unsqueeze(y_mask, -1)
 
         attn = commons.generate_path(duration.unsqueeze(1), attn_mask)
-
 
         x = x + z_q
 
@@ -757,26 +836,22 @@ class SynthesizerTrn(nn.Module):
         o = self.dec((z * y_mask), g=g)
         return o, attn, y_mask, (z, z_p, m_p, logs_p)
 
-    def infer(self, x, x_lengths,ref, bert,spk_emb,noise_scale=.4):
-        g = self.ref_enc(ref) + self.spk_emb_proj(spk_emb).unsqueeze(-1)
-
+    def infer(self, x, x_lengths, ref, bert, spk_emb, noise_scale=.4):
+        g = self.ref_enc(ref)
 
         x_mask = torch.unsqueeze(commons.sequence_mask(x_lengths, x.size(-1)), 1).to(bert.dtype)
 
         x, x_mask = self.enc_p(x, x_lengths, bert)
         pred_prosody_codes = self.prosody_predictor.infer(x, x_mask, bert, spk_emb)
-        z_q, duration= self.prosody_encoder.decode(pred_prosody_codes, x_mask)
-
+        z_q, duration = self.prosody_encoder.decode(pred_prosody_codes, x_mask)
 
         total_duration = torch.sum(duration, dim=1)
         y_lengths = total_duration.long()
-
 
         y_mask = torch.unsqueeze(commons.sequence_mask(y_lengths, y_lengths.max()), 1).float()
         attn_mask = torch.unsqueeze(x_mask, 2) * torch.unsqueeze(y_mask, -1)
 
         attn = commons.generate_path(duration.unsqueeze(1), attn_mask)
-
 
         x = x + z_q
 
@@ -787,37 +862,3 @@ class SynthesizerTrn(nn.Module):
         z = self.flow(z_p, y_mask, g=g, reverse=True)
         o = self.dec((z * y_mask), g=g)
         return o
-
-
-
-    def decode_codes(self, codes, ref, noise_scale=.4):
-        x,  indices = codes[:, 0], codes[:, 1]
-        x_lengths = torch.tensor([x.shape[-1]], dtype=torch.long, device=x.device)
-        x_mask = torch.unsqueeze(commons.sequence_mask(x_lengths, x.size(-1)), 1).float()
-        print(indices)
-        z_q, duration= self.prosody_encoder.decode(indices, x_mask)
-
-        total_duration = torch.sum(duration, dim=1)
-        y_lengths = total_duration.long()
-
-
-        y_mask = torch.unsqueeze(commons.sequence_mask(y_lengths, y_lengths.max()), 1).float()
-        attn_mask = torch.unsqueeze(x_mask, 2) * torch.unsqueeze(y_mask, -1)
-
-        attn = commons.generate_path(duration.unsqueeze(1), attn_mask)
-
-
-
-
-
-
-        g = self.ref_enc(ref ,)
-        x, x_mask = self.enc_p(x, x_lengths, z_q)
-        frame_x = torch.matmul(attn.squeeze(1), x.transpose(1, 2)).transpose(1, 2)
-        m_p, logs_p = self.frame_prior_net(frame_x, y_mask)
-
-        z_p = m_p + torch.randn_like(m_p) * torch.exp(logs_p) * noise_scale
-        z = self.flow(z_p, y_mask, g=g, reverse=True)
-        o = self.dec((z * y_mask), g=g)
-        return o
-
